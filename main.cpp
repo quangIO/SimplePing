@@ -4,11 +4,13 @@
 #include <unistd.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
-#include <dnet.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
 
 struct icmp_packet {
-    icmphdr header{};
+    icmphdr header{}; // the icmp v6 header struct for echo is the same
     char msg[56]{};
 
     explicit icmp_packet(const char *msg, bool is_ipv6) {
@@ -70,8 +72,8 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = fal
 
         icmp_packet buffer("echo reply", is_ipv6);
         auto start = std::chrono::high_resolution_clock::now();
-        while (buffer.header.type != 69 + 60 * is_ipv6) {
-            if (recvfrom(sock_fd, &buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&r_addr), &r_len) <= 0) {
+        while (buffer.header.type != 69 + 60 * is_ipv6) { // only care about the reply messages
+            if (recvfrom(sock_fd, &buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&r_addr), &r_len) < 0) {
                 std::cout << "Packet loss" << std::endl;
                 break;
             }
@@ -82,8 +84,6 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = fal
             std::cout << "Time exceeded" << std::endl;
             continue;
         }
-
-        // std::cout << int(buffer.header.type) << std::endl;
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> rtt = end - start;
@@ -99,7 +99,7 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = fal
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " " << "(hostname|ip address)" << std::endl;
+        std::cout << "Usage: " << argv[0] << " " << "(hostname|ip address) [ttl]" << std::endl;
         return 1;
     }
     socklen_t ttl = (argc == 3) ? atoi(argv[2]) : 64;
