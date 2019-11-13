@@ -17,7 +17,7 @@ struct icmp_packet {
         header.type = is_ipv6 ? ICMPV6_ECHO_REQUEST : ICMP_ECHO;
         header.code = 0;
         header.un.echo.id = getpid();
-        header.un.echo.sequence = 1;
+        header.un.echo.sequence = 0;
         strncpy(this->msg, msg, 55);
         checksum();
     }
@@ -58,12 +58,14 @@ char *dns_lookup(const char *hostname, sockaddr_storage &addr, bool &is_ipv6) {
     return ip;
 }
 
-void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = false) {
+void send_request(int &sock_fd, const sockaddr_storage &addr, int cnt = 100, bool is_ipv6 = false) {
     icmp_packet packet("echo requests", is_ipv6);
     sockaddr_storage r_addr{};
     socklen_t r_len = sizeof(r_addr);
-    int cnt = 100;
-    while (cnt--) {
+    while (packet.header.un.echo.sequence++ < cnt) {
+        packet.checksum();
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(500ms);
         if (sendto(sock_fd, &packet, sizeof(packet), 0,
                    reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) < 1) {
             std::cerr << "Failed to send packet" << std::endl;
@@ -72,11 +74,17 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = fal
 
         icmp_packet buffer("echo reply", is_ipv6);
         auto start = std::chrono::high_resolution_clock::now();
+        bool failed = false;
         while (buffer.header.type != 69 + 60 * is_ipv6) { // only care about the reply messages
             if (recvfrom(sock_fd, &buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&r_addr), &r_len) < 0) {
-                std::cout << "Packet loss" << std::endl;
+                std::cerr << "Cannot receive from socket" << std::endl;
+                failed = true;
                 break;
             }
+        }
+
+        if (failed) {
+            continue;
         }
 
         bool time_exceeded = is_ipv6 ? buffer.header.code == ICMPV6_TIME_EXCEED : buffer.header.code == 192;
@@ -85,24 +93,26 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, bool is_ipv6 = fal
             continue;
         }
 
+        if (buffer.header.code) {
+            std::cout << "Packet loss" << std::endl; // For simplicity, I just print a generic error message
+            continue;
+        }
+        std::cout << buffer.msg << std::endl;
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> rtt = end - start;
         std::cout << "Received reply: seq=" << packet.header.un.echo.sequence
                   << " rrt=" << rtt.count() << "ms" << std::endl;
-        ++packet.header.un.echo.sequence;
-        packet.checksum();
-        using namespace std::chrono_literals;
-        std::this_thread::sleep_for(500ms);
     }
 
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " " << "(hostname|ip address) [ttl]" << std::endl;
+        std::cout << "Usage: " << argv[0] << " " << "(hostname|ip address) [ttl] [times]" << std::endl;
         return 1;
     }
-    socklen_t ttl = (argc == 3) ? atoi(argv[2]) : 64;
+    socklen_t ttl = (argc >= 3) ? atoi(argv[2]) : 64;
+    int cnt = (argc >= 4) ? atoi(argv[3]) : 64;
     bool is_ipv6 = false;
     sockaddr_storage addr{};
     char *ip = dns_lookup(argv[1], addr, is_ipv6);
@@ -114,6 +124,6 @@ int main(int argc, char **argv) {
     }
     if (setsockopt(sock_fd, SOL_IP, IP_TTL, &ttl, sizeof(ttl)))
         std::cerr << "Error setting TTL" << std::endl;
-    send_request(sock_fd, addr, is_ipv6);
+    send_request(sock_fd, addr, cnt, is_ipv6);
     return 0;
 }
