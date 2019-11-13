@@ -9,7 +9,7 @@ jobs:
 
       - run:
           name: mkdir
-          command: rm -rf build && cd build
+          command: rm -rf build && mkdir build
       - run:
           name: build
           working_directory: build
