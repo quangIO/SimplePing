@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -58,7 +60,7 @@ char *dns_lookup(const char *hostname, sockaddr_storage &addr, bool &is_ipv6) {
     return ip;
 }
 
-void send_request(int &sock_fd, const sockaddr_storage &addr, int cnt = 100, bool is_ipv6 = false) {
+void send_request(int sock_fd, const sockaddr_storage &addr, int cnt = 100, bool is_ipv6 = false) {
     icmp_packet packet("echo requests", is_ipv6);
     sockaddr_storage r_addr{};
     socklen_t r_len = sizeof(r_addr);
@@ -72,33 +74,39 @@ void send_request(int &sock_fd, const sockaddr_storage &addr, int cnt = 100, boo
             continue;
         }
 
-        icmp_packet buffer("echo reply", is_ipv6);
-        auto start = std::chrono::high_resolution_clock::now();
+        icmp_packet *buffer = nullptr;
+        static char buf[512];
+        const auto start = std::chrono::high_resolution_clock::now();
         bool failed = false;
-        while (buffer.header.type != 69 + 60 * is_ipv6) { // only care about the reply messages
-            if (recvfrom(sock_fd, &buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr *>(&r_addr), &r_len) < 0) {
+        // only care about the reply messages from our ping
+        while (!buffer || buffer->header.type != (is_ipv6 ? ICMPV6_ECHO_REPLY : ICMP_ECHOREPLY) ||
+               buffer->header.un.echo.id != packet.header.un.echo.id) {
+            if (recvfrom(sock_fd, buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&r_addr), &r_len) < 0) {
                 std::cerr << "Cannot receive from socket" << std::endl;
                 failed = true;
                 break;
             }
-        }
+            auto ip = reinterpret_cast<iphdr *>(buf);
+            buffer = reinterpret_cast<icmp_packet *>(buf + (is_ipv6 ? 0 : (ip->ihl << 2u)));
+            const bool time_exceeded = buffer->header.type == (is_ipv6 ? ICMPV6_TIME_EXCEED : ICMP_TIME_EXCEEDED);
+            // auto ttl = ip->ttl;
+            if (time_exceeded) {
+                std::cout << "Time Exceeded" << std::endl;
+                failed = true;
+                break;
+            }
 
-        if (failed) {
-            continue;
+            const bool unreachable = buffer->header.type == (is_ipv6 ? ICMPV6_DEST_UNREACH : ICMP_DEST_UNREACH);
+            if (unreachable) {
+                std::cout << "Destination Unreachable" << std::endl;
+                failed = true;
+                break;
+            }
         }
+        if (failed)
+            continue;
 
-        bool time_exceeded = is_ipv6 ? buffer.header.code == ICMPV6_TIME_EXCEED : buffer.header.code == 192;
-        if (time_exceeded) {
-            std::cout << "Time exceeded" << std::endl;
-            continue;
-        }
-
-        if (buffer.header.code) {
-            std::cout << "Packet loss" << std::endl; // For simplicity, I just print a generic error message
-            continue;
-        }
-        std::cout << buffer.msg << std::endl;
-        auto end = std::chrono::high_resolution_clock::now();
+        const auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> rtt = end - start;
         std::cout << "Received reply: seq=" << packet.header.un.echo.sequence
                   << " rrt=" << rtt.count() << "ms" << std::endl;
@@ -111,19 +119,22 @@ int main(int argc, char **argv) {
         std::cout << "Usage: " << argv[0] << " " << "(hostname|ip address) [ttl] [times]" << std::endl;
         return 1;
     }
-    socklen_t ttl = (argc >= 3) ? atoi(argv[2]) : 64;
-    int cnt = (argc >= 4) ? atoi(argv[3]) : 64;
+    const socklen_t ttl = (argc >= 3) ? atoi(argv[2]) : 0;
+    const int cnt = (argc >= 4) ? atoi(argv[3]) : 64;
     bool is_ipv6 = false;
     sockaddr_storage addr{};
-    char *ip = dns_lookup(argv[1], addr, is_ipv6);
+    const char *ip = dns_lookup(argv[1], addr, is_ipv6);
+    if (!ip) return 2;
     std::cout << "PING " << argv[1] << " (" << ip << ")" << std::endl;
-    int sock_fd = socket(is_ipv6 ? PF_INET6 : PF_INET, SOCK_RAW, is_ipv6 ? IPPROTO_ICMPV6 : IPPROTO_ICMP);
+    const int sock_fd = socket(is_ipv6 ? PF_INET6 : PF_INET,
+                               SOCK_RAW, is_ipv6 ? IPPROTO_ICMPV6 : IPPROTO_ICMP);
     if (sock_fd < 0) {
         std::cerr << "Cannot open socket fd\n" << "Consider running with sudo" << std::endl;
         return sock_fd;
     }
-    if (setsockopt(sock_fd, SOL_IP, IP_TTL, &ttl, sizeof(ttl)))
+    if (ttl && setsockopt(sock_fd, is_ipv6 ? SOL_ICMPV6 : SOL_IP, IP_TTL, &ttl, sizeof(ttl)))
         std::cerr << "Error setting TTL" << std::endl;
     send_request(sock_fd, addr, cnt, is_ipv6);
+    close(sock_fd);
     return 0;
 }
