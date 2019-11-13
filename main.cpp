@@ -132,7 +132,8 @@ int main(int argc, char **argv) {
         std::cerr << "Cannot open socket fd\n" << "Consider running with sudo" << std::endl;
         return sock_fd;
     }
-    if (ttl && setsockopt(sock_fd, is_ipv6 ? SOL_ICMPV6 : SOL_IP, IP_TTL, &ttl, sizeof(ttl)))
+    if (ttl && setsockopt(sock_fd, is_ipv6 ? IPPROTO_ICMPV6 : SOL_IP,
+                          is_ipv6 ? IPV6_HOPLIMIT : IP_TTL, &ttl, sizeof(ttl)))
         std::cerr << "Error setting TTL" << std::endl;
     send_request(sock_fd, addr, cnt, is_ipv6);
     close(sock_fd);
