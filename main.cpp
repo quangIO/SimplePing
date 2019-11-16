@@ -64,10 +64,12 @@ void send_request(int sock_fd, const sockaddr_storage &addr, int cnt = 100, bool
     icmp_packet packet("echo requests", is_ipv6);
     sockaddr_storage r_addr{};
     socklen_t r_len = sizeof(r_addr);
+
     while (packet.header.un.echo.sequence++ < cnt) {
         packet.checksum();
         using namespace std::chrono_literals;
         std::this_thread::sleep_for(500ms);
+        const auto start = std::chrono::high_resolution_clock::now();
         if (sendto(sock_fd, &packet, sizeof(packet), 0,
                    reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) < 1) {
             std::cerr << "Failed to send packet" << std::endl;
@@ -76,7 +78,6 @@ void send_request(int sock_fd, const sockaddr_storage &addr, int cnt = 100, bool
 
         icmp_packet *buffer = nullptr;
         static char buf[512];
-        const auto start = std::chrono::high_resolution_clock::now();
         bool failed = false;
         // only care about the reply messages from our ping
         while (!buffer || buffer->header.type != (is_ipv6 ? ICMPV6_ECHO_REPLY : ICMP_ECHOREPLY) ||
@@ -132,9 +133,13 @@ int main(int argc, char **argv) {
         std::cerr << "Cannot open socket fd\n" << "Consider running with sudo" << std::endl;
         return sock_fd;
     }
-    if (ttl && setsockopt(sock_fd, is_ipv6 ? IPPROTO_ICMPV6 : SOL_IP,
-                          is_ipv6 ? IPV6_HOPLIMIT : IP_TTL, &ttl, sizeof(ttl)))
+    if (ttl && setsockopt(sock_fd, is_ipv6 ? SOL_IPV6 : SOL_IP,
+                          is_ipv6 ? IPV6_HOPLIMIT : IP_TTL, &ttl, sizeof(ttl))) {
+        if (is_ipv6)
+            setsockopt(sock_fd, SOL_IPV6, IPV6_UNICAST_HOPS, &ttl, sizeof(ttl)); // try my best
         std::cerr << "Error setting TTL" << std::endl;
+    }
+
     send_request(sock_fd, addr, cnt, is_ipv6);
     close(sock_fd);
     return 0;
